@@ -26,7 +26,13 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "rabcl/utils/type.hpp"
+#include "rabcl/interface/can.hpp"
+#include "rabcl/component/jga25_370.hpp"
+#include "rabcl/controller/omni_drive.hpp"
 
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,6 +42,11 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+uint16_t control_count = 0;
+char printf_buf[100];
+
+rabcl::Info robot_data;
+rabcl::JGA25_370* yaw_motor;
 
 /* USER CODE END PD */
 
@@ -58,7 +69,67 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int16_t read_tim2_encoder_value()
+{
+  uint16_t enc_buff = TIM2->CNT;
+  int16_t enc_count = (int16_t)enc_buff - 32767;
+  TIM2->CNT = 32767;
+  return enc_count;
+}
 
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim == &htim15)
+  {
+    control_count++;
+    if (control_count >= 10) // 100Hz
+    {
+      control_count = 0;
+
+      // ---yaw motor
+      yaw_motor->SetCmdVel(robot_data.yaw_vel_);
+      // snprintf(printf_buf, 100, "robot_data.yaw_vel: %f[rad/s]\n", robot_data.yaw_vel_);
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+
+      yaw_motor->SetEncoderCount(read_tim2_encoder_value());
+      yaw_motor->UpdataEncoder();
+      // snprintf(printf_buf, 100, "yaw_act_vel: %f[rad/s]\n", yaw_motor->GetActVel());
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+      // snprintf(printf_buf, 100, "yaw_act_pos: %f[rad], %f[deg]\n", yaw_motor->GetActPos(), yaw_motor->GetActPos() * 57.295779513);
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+
+      int16_t output = yaw_motor->CalcMotorOutput();
+      // snprintf(printf_buf, 100, "yaw_output: %d[count]\n", output);
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+      if (output > 0)
+      {
+        HAL_GPIO_WritePin(MOTOR_PAHSE_GPIO_Port, MOTOR_PAHSE_Pin, GPIO_PIN_SET);
+      }
+      else
+      {
+        output *= -1;
+        HAL_GPIO_WritePin(MOTOR_PAHSE_GPIO_Port, MOTOR_PAHSE_Pin, GPIO_PIN_RESET);
+      }
+
+      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint16_t)output);
+      // snprintf(printf_buf, 100, "yaw_cmd_vel: %f[rad/s]\n", yaw_motor->GetCmdVel());
+      // HAL_UART_Transmit(&huart2, (uint8_t*)printf_buf, strlen(printf_buf), 1000);
+    }
+  }
+}
+
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+  CAN_RxHeaderTypeDef RxHeader;
+  uint8_t RxData[8];
+  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK)
+  {
+    if (rabcl::Can::UpdateData(RxHeader.StdId, RxData, robot_data))
+    {
+      HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+    }
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -69,7 +140,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  yaw_motor = new rabcl::JGA25_370(1000 - 1, 75.0 * (38.0 / 25.0));
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -97,6 +168,18 @@ int main(void)
   MX_TIM15_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  // ---start PWM
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+
+  // ---start interrupt processing
+  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  HAL_CAN_Start(&hcan);
+  if (HAL_CAN_ActivateNotification(&hcan, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  TIM2->CNT = 32767;
+  HAL_TIM_Base_Start_IT(&htim15);
 
   /* USER CODE END 2 */
 
